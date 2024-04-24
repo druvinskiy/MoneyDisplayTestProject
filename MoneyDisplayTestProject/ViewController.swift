@@ -13,7 +13,6 @@ class ViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        // Do any additional setup after loading the view.
         
         currencyTextView.backgroundColor = .systemBackground
         currencyTextView.translatesAutoresizingMaskIntoConstraints = false
@@ -33,64 +32,49 @@ class ViewController: UIViewController {
 }
 
 class CurrencyTextView: UIView, UIKeyInput {
-    /*
-     
-     Dollar sign is always visible (cannot delete it)
-     When there's no text entered, we see a greyed out 0.
-     Commas are added automatically as the user types
-     
-     
-     
-     When the user adds a decimal, the 00s are added automatically in grey
-     If there's a single decimal #, the user's number is a regular color and the remaining 0 is grey
-     
-     If two decimals are entered, backspacing brings back the 0 decimal in grey
-     
-     If the user backspaces all the way back to the whole number, add commas as they keep typing until they add the decimal back
-     
-     If the user backspaces all the way back, display the original greyed out 0
-     
-     The UI prevents the user from entering more than two decimal digits
-     
-     Test cases:
-     $ -> 6 -> $6
-     $6 -> 5 -> $65
-     $65 -> 7 $657
-     $657 -> 8 -> $6,578
-     */
-    
-    enum Mode {
+    enum Mode: Equatable {
         case whole
-        case fractional
+        case fractional(numValues: Int)
+        case fractionNoDigits
+        case fractionalWithValueInHundredthsPlace
     }
     
     var mode = Mode.whole
     
     var wholeValues = 0
     var fractionalValues = 0
-    var numFractionalValues = 0
     
-    var formattedAmount: String {
+    let numberFormatter: NumberFormatter = {
         let numberFormatter = NumberFormatter()
-        numberFormatter.minimumFractionDigits = mode == .whole ? 0 : 2
         numberFormatter.numberStyle = .currency
         numberFormatter.currencyCode = "USD"
         
-        if fractionalValues > 0 {
-            if numFractionalValues == fractionalValues.numberOfDigits() {
-                let combined = wholeValues.combine(with: fractionalValues)
-                let decimalValue = combined.convertToDecimal(numFractionalValues: numFractionalValues)
-                
-                return numberFormatter.string(from: NSDecimalNumber(decimal: decimalValue))!
-            }
+        return numberFormatter
+    }()
+    
+    var formattedAmount: String {
+        switch mode {
+        case .whole:
+            numberFormatter.minimumFractionDigits = 0
+            return numberFormatter.string(for: wholeValues)!
             
-            let decimalValue = Decimal(fractionalValues) / Decimal(100)
-            let combined = Decimal(wholeValues) + decimalValue
+        case .fractionNoDigits:
+            numberFormatter.minimumFractionDigits = 2
+            return numberFormatter.string(for: wholeValues)!
             
+        case .fractional(let numValues):
+            let combined = wholeValues.combine(with: fractionalValues)
+            let decimal = combined.convertToDecimal(numFractionalValues: numValues)
+            
+            numberFormatter.minimumFractionDigits = 2
+            return numberFormatter.string(from: NSDecimalNumber(decimal: decimal))!
+        case .fractionalWithValueInHundredthsPlace:
+            let decimal = fractionalValues.convertToDecimal(numFractionalValues: 2)
+            let combined = Decimal(wholeValues) + decimal
+            
+            numberFormatter.minimumFractionDigits = 2
             return numberFormatter.string(from: NSDecimalNumber(decimal: combined))!
         }
-        
-        return numberFormatter.string(for: wholeValues)!
     }
     
     override var canBecomeFirstResponder: Bool { true }
@@ -124,23 +108,41 @@ class CurrencyTextView: UIView, UIKeyInput {
     }
     
     func insertText(_ text: String) {
-        if text == "." {
-            mode = .fractional
+        if text == "." && mode == .whole {
+            mode = .fractionNoDigits
             updateLabel()
             
             return
         }
         
-        guard let int = Int(text) else { return }
+        guard let int = Int(text) else {
+            return
+        }
         
         switch mode {
-        case .fractional:
-            guard numFractionalValues < 2 else { return }
-            
-            fractionalValues = fractionalValues * 10 + int
-            numFractionalValues += 1
         case .whole:
             wholeValues = wholeValues * 10 + int
+        case .fractional(let numValues):
+            if numValues == 2 {
+                break
+            }
+            
+            if numValues == 1 && fractionalValues == 0 {
+                fractionalValues = int
+                mode = .fractionalWithValueInHundredthsPlace
+                
+                break
+            }
+            
+            mode = .fractional(numValues: 2)
+            
+            fractionalValues = fractionalValues * 10 + int
+        case .fractionNoDigits:
+            mode = .fractional(numValues: 1)
+            
+            fractionalValues = fractionalValues * 10 + int
+        case .fractionalWithValueInHundredthsPlace:
+            break
         }
         
         updateLabel()
@@ -150,28 +152,64 @@ class CurrencyTextView: UIView, UIKeyInput {
         switch mode {
         case .whole:
             wholeValues = wholeValues / 10
-        case .fractional:
-            fractionalValues = fractionalValues / 10
+        case .fractional(var numValues):
+            numValues -= 1
             
-            if numFractionalValues == 0 {
-                mode = .whole
+            if numValues == 0 {
+                mode = .fractionNoDigits
             } else {
-                numFractionalValues -= 1
+                mode = .fractional(numValues: numValues)
             }
+            
+            fractionalValues = fractionalValues / 10
+        case .fractionNoDigits:
+            mode = .whole
+        case .fractionalWithValueInHundredthsPlace:
+            mode = .fractional(numValues: 1)
+            fractionalValues = fractionalValues / 10
         }
         
         updateLabel()
     }
     
     func updateLabel() {
-//        var attributedString = AttributedString(formatted)
-//        let start = attributedString.characters.index(attributedString.startIndex, offsetBy: 1)
-//        let end = attributedString.characters.index(start, offsetBy: 2)
-//        attributedString[start..<end].foregroundColor = .red
-//
-//        label.attributedText = NSAttributedString(attributedString)
+        var attributedString = AttributedString(formattedAmount)
         
-        label.text = formattedAmount
+        let range = rangeToColor(for: attributedString)
+        attributedString[range].foregroundColor = .red
+        
+        label.attributedText = NSAttributedString(attributedString)
+    }
+    
+    func rangeToColor(for attributedString: AttributedString) -> Range<AttributedString.Index> {
+        var start = attributedString.characters.startIndex
+        var end = attributedString.characters.startIndex
+        
+        switch mode {
+        case .whole:
+            if wholeValues == 0 {
+                start = attributedString.characters.index(attributedString.startIndex, offsetBy: 1)
+                end = attributedString.characters.index(start, offsetBy: 1)
+            }
+        case .fractional(let numFractionalValues):
+            let numCommas = formattedAmount.components(separatedBy: ",").count - 1
+            let numWholeValues = wholeValues.numberOfDigits()
+            let offset = numCommas + numWholeValues + numFractionalValues + 2
+            
+            start = attributedString.characters.index(attributedString.startIndex, offsetBy: offset)
+            end = attributedString.characters.endIndex
+        case .fractionNoDigits:
+            let numberCommas = formattedAmount.components(separatedBy: ",").count - 1
+            let numWholeValues = wholeValues.numberOfDigits()
+            let offset = numberCommas + numWholeValues + 2
+            
+            start = attributedString.characters.index(attributedString.startIndex, offsetBy: offset)
+            end = attributedString.characters.endIndex
+        case .fractionalWithValueInHundredthsPlace:
+            break
+        }
+        
+        return start..<end
     }
 }
 
